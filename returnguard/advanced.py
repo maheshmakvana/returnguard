@@ -853,3 +853,350 @@ class _LogSpan:
     def __exit__(self, *args: Any) -> None:
         elapsed = round((time.monotonic() - self._t0) * 1000, 2)
         logger.debug("[span:end] service=%s operation=%s elapsed_ms=%s", self._service, self._name, elapsed)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERT v1.2.0: REFUND ANOMALY DETECTOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class RefundAnomaly:
+    """A detected statistical anomaly in a refund amount."""
+    return_id: str
+    customer_id: str
+    refund_amount: float
+    z_score: float
+    population_mean: float
+    population_std: float
+    anomaly_type: str    # "extreme_high", "extreme_low", "round_number", "duplicate_amount"
+    confidence: float
+    description: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "return_id": self.return_id,
+            "customer_id": self.customer_id,
+            "refund_amount": round(self.refund_amount, 2),
+            "z_score": round(self.z_score, 3),
+            "anomaly_type": self.anomaly_type,
+            "confidence": round(self.confidence, 3),
+            "description": self.description,
+        }
+
+
+class RefundAnomalyDetector:
+    """
+    Detect statistical anomalies in refund amounts using z-score analysis.
+
+    Maintains a rolling population of refund amounts and flags individual
+    refunds that deviate significantly from the norm. Also detects round-number
+    manipulation and exact-duplicate refund patterns that human reviewers miss.
+
+    Usage::
+
+        detector = RefundAnomalyDetector(z_threshold=3.0)
+        detector.fit(historical_amounts)
+        anomalies = detector.detect(return_requests)
+        for a in anomalies:
+            print(a.anomaly_type, a.refund_amount)
+    """
+
+    def __init__(self, z_threshold: float = 3.0, window: int = 500) -> None:
+        self.z_threshold = z_threshold
+        self.window = window
+        self._amounts: List[float] = []
+        self._lock = threading.Lock()
+
+    def fit(self, amounts: List[float]) -> "RefundAnomalyDetector":
+        """Seed the detector with historical refund amounts."""
+        with self._lock:
+            self._amounts = list(amounts[-self.window:])
+        return self
+
+    def record(self, amount: float) -> None:
+        """Add a new refund amount to the rolling population."""
+        with self._lock:
+            self._amounts.append(amount)
+            if len(self._amounts) > self.window:
+                self._amounts.pop(0)
+
+    def _stats(self) -> Tuple[float, float]:
+        """Return (mean, std) of current population."""
+        import statistics
+        if len(self._amounts) < 2:
+            return 0.0, 1.0
+        mean = sum(self._amounts) / len(self._amounts)
+        std = statistics.stdev(self._amounts) or 1.0
+        return mean, std
+
+    def detect(self, requests: List[ReturnRequest]) -> List[RefundAnomaly]:
+        """
+        Detect anomalies across a batch of return requests.
+
+        Checks: extreme z-score, round-number manipulation, duplicate amounts.
+        """
+        mean, std = self._stats()
+        anomalies: List[RefundAnomaly] = []
+        seen_amounts: Dict[float, int] = {}
+
+        for req in requests:
+            amount = req.order_value
+            seen_amounts[amount] = seen_amounts.get(amount, 0) + 1
+
+        for req in requests:
+            amount = req.order_value
+            z = (amount - mean) / std if std > 0 else 0.0
+
+            if abs(z) >= self.z_threshold:
+                atype = "extreme_high" if z > 0 else "extreme_low"
+                conf = min(0.99, abs(z) / (self.z_threshold * 2))
+                anomalies.append(RefundAnomaly(
+                    return_id=req.return_id,
+                    customer_id=req.customer_id,
+                    refund_amount=amount,
+                    z_score=z,
+                    population_mean=mean,
+                    population_std=std,
+                    anomaly_type=atype,
+                    confidence=conf,
+                    description=(
+                        f"Refund amount ${amount:.2f} is {abs(z):.1f} std devs "
+                        f"{'above' if z > 0 else 'below'} mean ${mean:.2f}."
+                    ),
+                ))
+            elif amount > 0 and amount % 100 == 0 and amount >= 500:
+                anomalies.append(RefundAnomaly(
+                    return_id=req.return_id,
+                    customer_id=req.customer_id,
+                    refund_amount=amount,
+                    z_score=z,
+                    population_mean=mean,
+                    population_std=std,
+                    anomaly_type="round_number",
+                    confidence=0.45,
+                    description=f"Refund amount ${amount:.0f} is a suspiciously round number.",
+                ))
+            elif seen_amounts.get(amount, 0) >= 3:
+                anomalies.append(RefundAnomaly(
+                    return_id=req.return_id,
+                    customer_id=req.customer_id,
+                    refund_amount=amount,
+                    z_score=z,
+                    population_mean=mean,
+                    population_std=std,
+                    anomaly_type="duplicate_amount",
+                    confidence=0.60,
+                    description=f"Refund amount ${amount:.2f} appears {seen_amounts[amount]} times in this batch.",
+                ))
+
+        return sorted(anomalies, key=lambda x: x.confidence, reverse=True)
+
+    def summary(self, anomalies: List[RefundAnomaly]) -> Dict[str, Any]:
+        """Return aggregate statistics over detected anomalies."""
+        by_type: Dict[str, int] = {}
+        for a in anomalies:
+            by_type[a.anomaly_type] = by_type.get(a.anomaly_type, 0) + 1
+        return {
+            "total_anomalies": len(anomalies),
+            "by_type": by_type,
+            "population_size": len(self._amounts),
+            "population_mean": round(self._stats()[0], 2),
+            "population_std": round(self._stats()[1], 2),
+        }
+
+    def to_markdown(self, anomalies: List[RefundAnomaly]) -> str:
+        """Render a Markdown anomaly report."""
+        lines = [
+            "# Refund Anomaly Detection Report",
+            "",
+            "| Return ID | Customer | Amount | Z-Score | Type | Confidence |",
+            "|-----------|----------|--------|---------|------|------------|",
+        ]
+        for a in anomalies:
+            lines.append(
+                f"| {a.return_id} | {a.customer_id} | ${a.refund_amount:.2f} | "
+                f"{a.z_score:+.2f} | {a.anomaly_type.replace('_', ' ')} | "
+                f"{a.confidence:.0%} |"
+            )
+        if not anomalies:
+            lines.append("| _No anomalies detected_ | — | — | — | — | — |")
+        return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERT v1.2.0: BEHAVIOR FINGERPRINTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class BehaviorFingerprint:
+    """
+    A compact behavioral fingerprint for a customer's return history.
+
+    Feature vector encodes: return rate, avg days to return, dominant reason,
+    avg order value, % high-value returns, velocity (returns per month).
+    Used for similarity scoring and cohort matching.
+    """
+    customer_id: str
+    return_rate: float
+    avg_days_to_return: float
+    dominant_reason: Optional[str]
+    avg_order_value: float
+    high_value_pct: float     # fraction of returns above merchant's 75th-pct order value
+    velocity_per_month: float
+    _vector: List[float] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "customer_id": self.customer_id,
+            "return_rate": round(self.return_rate, 4),
+            "avg_days_to_return": round(self.avg_days_to_return, 1),
+            "dominant_reason": self.dominant_reason,
+            "avg_order_value": round(self.avg_order_value, 2),
+            "high_value_pct": round(self.high_value_pct, 4),
+            "velocity_per_month": round(self.velocity_per_month, 3),
+        }
+
+
+@dataclass
+class FingerprintSimilarity:
+    """Cosine similarity between two customer fingerprints."""
+    customer_a: str
+    customer_b: str
+    similarity: float   # 0.0 – 1.0
+    shared_signals: List[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "customer_a": self.customer_a,
+            "customer_b": self.customer_b,
+            "similarity": round(self.similarity, 4),
+            "shared_signals": self.shared_signals,
+        }
+
+
+class BehaviorFingerprinter:
+    """
+    Build compact behavioral fingerprints from customer return histories.
+
+    Fingerprints encode return rate, timing, reason distribution, order value
+    distribution, and velocity into a normalised feature vector. Cosine
+    similarity between fingerprints identifies customers who share fraud patterns
+    — useful for ring-fraud and coordinated abuse detection.
+
+    Usage::
+
+        fp = BehaviorFingerprinter(high_value_threshold=200.0)
+        fingerprints = fp.build_all(customer_profiles)
+        similar_pairs = fp.find_similar_pairs(fingerprints, threshold=0.85)
+    """
+
+    def __init__(self, high_value_threshold: float = 200.0) -> None:
+        self.high_value_threshold = high_value_threshold
+
+    def build(self, cp: CustomerProfile, history: Optional[List[ReturnRequest]] = None) -> BehaviorFingerprint:
+        """Build a fingerprint from a CustomerProfile (and optional raw history)."""
+        dominant: Optional[str] = None
+        if cp.return_reasons:
+            dominant = max(cp.return_reasons, key=lambda k: cp.return_reasons[k])
+
+        avg_days = 0.0
+        high_val_pct = 0.0
+        avg_ov = 0.0
+        velocity = 0.0
+        if history:
+            days_list = [r.days_since_purchase for r in history if r.days_since_purchase > 0]
+            avg_days = sum(days_list) / len(days_list) if days_list else 0.0
+            ovs = [r.order_value for r in history]
+            avg_ov = sum(ovs) / len(ovs) if ovs else 0.0
+            high_val_pct = sum(1 for v in ovs if v >= self.high_value_threshold) / len(ovs) if ovs else 0.0
+            # estimate monthly velocity: total returns / period — assume 12 months
+            velocity = len(history) / 12.0
+
+        # Build normalised feature vector [0..1]
+        reason_enc = {
+            "defective": 1, "wrong_item": 2, "changed_mind": 3,
+            "not_as_described": 4, "damaged": 5, "other": 6,
+        }
+        reason_val = reason_enc.get(dominant or "", 0) / 6.0
+
+        vector = [
+            min(1.0, cp.return_rate),
+            min(1.0, avg_days / 90.0),
+            reason_val,
+            min(1.0, avg_ov / 1000.0),
+            high_val_pct,
+            min(1.0, velocity / 10.0),
+        ]
+        fp = BehaviorFingerprint(
+            customer_id=cp.customer_id,
+            return_rate=cp.return_rate,
+            avg_days_to_return=avg_days,
+            dominant_reason=dominant,
+            avg_order_value=avg_ov,
+            high_value_pct=high_val_pct,
+            velocity_per_month=velocity,
+        )
+        fp._vector = vector
+        return fp
+
+    def build_all(
+        self,
+        profiles: List[CustomerProfile],
+        history_map: Optional[Dict[str, List[ReturnRequest]]] = None,
+    ) -> List[BehaviorFingerprint]:
+        """Build fingerprints for multiple customers."""
+        history_map = history_map or {}
+        return [self.build(cp, history_map.get(cp.customer_id)) for cp in profiles]
+
+    def similarity(self, a: BehaviorFingerprint, b: BehaviorFingerprint) -> FingerprintSimilarity:
+        """Compute cosine similarity between two fingerprints."""
+        import math
+        va, vb = a._vector, b._vector
+        if not va or not vb or len(va) != len(vb):
+            return FingerprintSimilarity(a.customer_id, b.customer_id, 0.0, [])
+
+        dot = sum(x * y for x, y in zip(va, vb))
+        mag_a = math.sqrt(sum(x * x for x in va))
+        mag_b = math.sqrt(sum(x * x for x in vb))
+        sim = dot / (mag_a * mag_b) if (mag_a * mag_b) > 0 else 0.0
+
+        shared: List[str] = []
+        dims = ["return_rate", "timing", "reason", "order_value", "high_value", "velocity"]
+        for i, (x, y) in enumerate(zip(va, vb)):
+            if abs(x - y) < 0.1 and (x + y) > 0.1:
+                shared.append(dims[i])
+
+        return FingerprintSimilarity(a.customer_id, b.customer_id, round(sim, 4), shared)
+
+    def find_similar_pairs(
+        self,
+        fingerprints: List[BehaviorFingerprint],
+        threshold: float = 0.85,
+    ) -> List[FingerprintSimilarity]:
+        """
+        Find all pairs of customers with similarity >= threshold.
+
+        O(n²) — suitable for batches up to ~10,000 customers.
+        """
+        pairs: List[FingerprintSimilarity] = []
+        for i in range(len(fingerprints)):
+            for j in range(i + 1, len(fingerprints)):
+                sim = self.similarity(fingerprints[i], fingerprints[j])
+                if sim.similarity >= threshold:
+                    pairs.append(sim)
+        return sorted(pairs, key=lambda x: x.similarity, reverse=True)
+
+    def to_markdown(self, pairs: List[FingerprintSimilarity]) -> str:
+        """Render a Markdown table of similar customer pairs."""
+        lines = [
+            "# Behavioral Fingerprint Similarity Report",
+            "",
+            "| Customer A | Customer B | Similarity | Shared Signals |",
+            "|------------|------------|------------|----------------|",
+        ]
+        for p in pairs:
+            shared = ", ".join(p.shared_signals) if p.shared_signals else "—"
+            lines.append(f"| {p.customer_a} | {p.customer_b} | {p.similarity:.1%} | {shared} |")
+        if not pairs:
+            lines.append("| _No similar pairs found_ | — | — | — |")
+        return "\n".join(lines)

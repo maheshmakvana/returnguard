@@ -16,9 +16,12 @@ from returnguard.exceptions import (
 )
 from returnguard.advanced import (
     AuditLog,
+    BehaviorFingerprint,
+    BehaviorFingerprinter,
     CancellationToken,
     CustomerRiskProfile,
     CustomerRiskProfiler,
+    FingerprintSimilarity,
     FraudCache,
     FraudDiff,
     FraudPipeline,
@@ -28,6 +31,8 @@ from returnguard.advanced import (
     PolicyScenario,
     PolicySimulationResult,
     RateLimiter,
+    RefundAnomaly,
+    RefundAnomalyDetector,
     ReturnPolicySimulator,
     ReturnRule,
     ReturnSpanEmitter,
@@ -40,7 +45,7 @@ from returnguard.advanced import (
     stream_scores,
 )
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __all__ = [
     # Core
     "FraudScorer",
@@ -72,7 +77,7 @@ __all__ = [
     "diff_scores",
     "AuditLog",
     "PIIScrubber",
-    # Advanced — expert
+    # Advanced — expert v1.1.0
     "CustomerRiskProfiler",
     "CustomerRiskProfile",
     "ReturnPolicySimulator",
@@ -80,4 +85,10 @@ __all__ = [
     "PolicySimulationResult",
     "FraudSignalExplainer",
     "ReturnSpanEmitter",
+    # Advanced — expert v1.2.0
+    "RefundAnomalyDetector",
+    "RefundAnomaly",
+    "BehaviorFingerprinter",
+    "BehaviorFingerprint",
+    "FingerprintSimilarity",
 ]

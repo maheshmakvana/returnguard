@@ -5,9 +5,9 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="returnguard",
-    version="1.0.1",
+    version="1.2.0",
     author="",
-    description="AI-powered returns fraud detection for retail and eCommerce — score return requests, detect wardrobing, serial returners, and policy abuse",
+    description="Returns fraud detection for retail and eCommerce — wardrobing, serial returner, refund anomaly detection, behavioral fingerprinting, policy simulation",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/returnguard-py/returnguard",
@@ -33,5 +33,8 @@ setup(
         "wardrobing detection", "return policy abuse", "refund fraud",
         "fraud scoring python", "return rate analysis",
         "customer fraud detection", "shopify fraud detection",
+        "refund anomaly detection python", "behavioral fingerprinting python",
+        "return policy simulator", "customer risk profiling",
+        "ecommerce returns analytics", "fraud signal explainer",
     ],
 )
