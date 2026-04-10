@@ -17,13 +17,20 @@ from returnguard.exceptions import (
 from returnguard.advanced import (
     AuditLog,
     CancellationToken,
+    CustomerRiskProfile,
+    CustomerRiskProfiler,
     FraudCache,
     FraudDiff,
     FraudPipeline,
     FraudProfiler,
+    FraudSignalExplainer,
     PIIScrubber,
+    PolicyScenario,
+    PolicySimulationResult,
     RateLimiter,
+    ReturnPolicySimulator,
     ReturnRule,
+    ReturnSpanEmitter,
     ReturnValidator,
     RiskTrend,
     abatch_score,
@@ -33,7 +40,7 @@ from returnguard.advanced import (
     stream_scores,
 )
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __all__ = [
     # Core
     "FraudScorer",
@@ -48,7 +55,7 @@ __all__ = [
     "ScoringError",
     "ProfileError",
     "ValidationError",
-    # Advanced
+    # Advanced — base
     "FraudCache",
     "FraudPipeline",
     "ReturnValidator",
@@ -65,4 +72,12 @@ __all__ = [
     "diff_scores",
     "AuditLog",
     "PIIScrubber",
+    # Advanced — expert
+    "CustomerRiskProfiler",
+    "CustomerRiskProfile",
+    "ReturnPolicySimulator",
+    "PolicyScenario",
+    "PolicySimulationResult",
+    "FraudSignalExplainer",
+    "ReturnSpanEmitter",
 ]

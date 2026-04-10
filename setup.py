@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as f:
 
 setup(
     name="returnguard",
-    version="1.0.0",
+    version="1.0.1",
     author="",
     description="AI-powered returns fraud detection for retail and eCommerce — score return requests, detect wardrobing, serial returners, and policy abuse",
     long_description=long_description,

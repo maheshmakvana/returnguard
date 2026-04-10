@@ -406,3 +406,450 @@ class PIIScrubber:
         text = cls._SSN.sub("[SSN]", text)
         text = cls._PHONE.sub("[PHONE]", text)
         return text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERT: CUSTOMER RISK PROFILER
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class CustomerRiskProfile:
+    """Aggregated risk profile derived from a CustomerProfile."""
+    customer_id: str
+    return_rate: float
+    avg_fraud_score: float
+    flagged_count: int
+    dominant_reason: Optional[str]
+    risk_tier: str          # "trusted", "watch", "restricted", "blocked"
+    recommended_policy: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "customer_id": self.customer_id,
+            "return_rate": round(self.return_rate, 4),
+            "avg_fraud_score": round(self.avg_fraud_score, 4),
+            "flagged_count": self.flagged_count,
+            "dominant_reason": self.dominant_reason,
+            "risk_tier": self.risk_tier,
+            "recommended_policy": self.recommended_policy,
+        }
+
+
+class CustomerRiskProfiler:
+    """
+    Build structured risk profiles from CustomerProfile objects.
+
+    Classifies customers into four tiers based on return rate, fraud score
+    history, and flagged count. Produces policy recommendations that can drive
+    automated return workflow rules (auto-approve, manual review, restrict, block).
+
+    Usage::
+
+        profiler = CustomerRiskProfiler()
+        profile = profiler.profile(customer_profile)
+        print(profile.risk_tier)  # "watch"
+        print(profile.recommended_policy)
+    """
+
+    _TIER_THRESHOLDS = {
+        "blocked":    {"fraud_score": 0.80, "return_rate": None, "flagged": 5},
+        "restricted": {"fraud_score": 0.60, "return_rate": 0.40, "flagged": 3},
+        "watch":      {"fraud_score": 0.35, "return_rate": 0.20, "flagged": 1},
+        "trusted":    {"fraud_score": 0.0,  "return_rate": 0.0,  "flagged": 0},
+    }
+
+    _POLICIES: Dict[str, str] = {
+        "blocked":    "Block return submission; escalate to fraud ops team for manual review.",
+        "restricted": "Require photo evidence + supervisor approval before processing any refund.",
+        "watch":      "Flag for manual review; allow return but hold refund pending verification.",
+        "trusted":    "Auto-approve return; issue refund immediately.",
+    }
+
+    def profile(self, cp: CustomerProfile) -> CustomerRiskProfile:
+        """Derive a risk profile from a CustomerProfile."""
+        dominant_reason: Optional[str] = None
+        if cp.return_reasons:
+            dominant_reason = max(cp.return_reasons, key=lambda k: cp.return_reasons[k])
+
+        tier = self._classify(cp)
+        return CustomerRiskProfile(
+            customer_id=cp.customer_id,
+            return_rate=cp.return_rate,
+            avg_fraud_score=cp.avg_fraud_score,
+            flagged_count=cp.flagged_count,
+            dominant_reason=dominant_reason,
+            risk_tier=tier,
+            recommended_policy=self._POLICIES[tier],
+        )
+
+    def _classify(self, cp: CustomerProfile) -> str:
+        t = self._TIER_THRESHOLDS
+        if cp.avg_fraud_score >= t["blocked"]["fraud_score"] or cp.flagged_count >= t["blocked"]["flagged"]:
+            return "blocked"
+        if cp.avg_fraud_score >= t["restricted"]["fraud_score"] or \
+           cp.return_rate >= t["restricted"]["return_rate"] or \
+           cp.flagged_count >= t["restricted"]["flagged"]:
+            return "restricted"
+        if cp.avg_fraud_score >= t["watch"]["fraud_score"] or \
+           cp.return_rate >= t["watch"]["return_rate"] or \
+           cp.flagged_count >= t["watch"]["flagged"]:
+            return "watch"
+        return "trusted"
+
+    def bulk_profile(self, profiles: List[CustomerProfile]) -> List[CustomerRiskProfile]:
+        """Profile multiple customers; returns list sorted by risk tier severity."""
+        order = {"blocked": 0, "restricted": 1, "watch": 2, "trusted": 3}
+        results = [self.profile(cp) for cp in profiles]
+        return sorted(results, key=lambda x: order[x.risk_tier])
+
+    def to_markdown(self, profiles: List[CustomerRiskProfile]) -> str:
+        """Render a Markdown risk summary table."""
+        lines = ["# Customer Risk Profiles", "",
+                 "| Customer ID | Return Rate | Avg Fraud Score | Flagged | Tier | Policy |",
+                 "|-------------|------------|----------------|---------|------|--------|"]
+        for p in profiles:
+            lines.append(
+                f"| {p.customer_id} | {p.return_rate:.1%} | {p.avg_fraud_score:.3f} | "
+                f"{p.flagged_count} | {p.risk_tier.upper()} | {p.recommended_policy[:60]}… |"
+            )
+        return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERT: RETURN POLICY SIMULATOR
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class PolicyScenario:
+    """A return policy configuration to simulate."""
+    name: str
+    max_return_window_days: int
+    max_order_value: float
+    allowed_reasons: List[str]
+    require_receipt: bool = False
+    max_returns_per_customer_30d: int = 10
+
+
+@dataclass
+class PolicySimulationResult:
+    """Outcome of simulating a policy against a batch of return requests."""
+    scenario_name: str
+    total_requests: int
+    approved: int
+    rejected: int
+    rejection_rate: float
+    rejection_reasons: Dict[str, int]
+    estimated_fraud_prevented: int   # count of high-score requests rejected
+
+    def summary(self) -> Dict[str, Any]:
+        return {
+            "scenario": self.scenario_name,
+            "total": self.total_requests,
+            "approved": self.approved,
+            "rejected": self.rejected,
+            "rejection_rate": round(self.rejection_rate, 4),
+            "estimated_fraud_prevented": self.estimated_fraud_prevented,
+            "top_rejection_reason": max(self.rejection_reasons, key=self.rejection_reasons.get) if self.rejection_reasons else None,
+        }
+
+
+class ReturnPolicySimulator:
+    """
+    Simulate different return policies against historical return request data.
+
+    Lets merchants test tighter or looser policies before rolling them out,
+    estimating approval rates and fraud prevention impact without affecting live
+    operations.
+
+    Usage::
+
+        sim = ReturnPolicySimulator()
+        scenario = PolicyScenario(
+            name="strict_90d",
+            max_return_window_days=90,
+            max_order_value=500.0,
+            allowed_reasons=["defective", "wrong_item"],
+        )
+        result = sim.simulate(scenario, requests, fraud_scores)
+        print(result.summary())
+    """
+
+    def simulate(
+        self,
+        scenario: PolicyScenario,
+        requests: List[ReturnRequest],
+        fraud_scores: Optional[List[FraudScore]] = None,
+        high_risk_threshold: float = 0.70,
+    ) -> PolicySimulationResult:
+        """Run a policy simulation over a batch of return requests."""
+        score_map: Dict[str, float] = {}
+        if fraud_scores:
+            score_map = {fs.return_id: fs.score for fs in fraud_scores}
+
+        # Track per-customer 30-day return counts for velocity rule
+        customer_counts: Dict[str, int] = {}
+        for r in requests:
+            customer_counts[r.customer_id] = customer_counts.get(r.customer_id, 0) + 1
+
+        approved = 0
+        rejected = 0
+        rejection_reasons: Dict[str, int] = {}
+        fraud_prevented = 0
+
+        for req in requests:
+            reason = self._evaluate(req, scenario, customer_counts, score_map, high_risk_threshold)
+            if reason is None:
+                approved += 1
+            else:
+                rejected += 1
+                rejection_reasons[reason] = rejection_reasons.get(reason, 0) + 1
+                score = score_map.get(req.return_id, 0.0)
+                if score >= high_risk_threshold:
+                    fraud_prevented += 1
+
+        total = len(requests)
+        return PolicySimulationResult(
+            scenario_name=scenario.name,
+            total_requests=total,
+            approved=approved,
+            rejected=rejected,
+            rejection_rate=rejected / total if total else 0.0,
+            rejection_reasons=rejection_reasons,
+            estimated_fraud_prevented=fraud_prevented,
+        )
+
+    def _evaluate(
+        self,
+        req: ReturnRequest,
+        scenario: PolicyScenario,
+        customer_counts: Dict[str, int],
+        score_map: Dict[str, float],
+        high_risk_threshold: float,
+    ) -> Optional[str]:
+        """Return a rejection reason string, or None if approved."""
+        if req.days_since_purchase > scenario.max_return_window_days:
+            return "exceeded_return_window"
+        if req.order_value > scenario.max_order_value:
+            return "order_value_too_high"
+        if req.reason.value not in scenario.allowed_reasons:
+            return "reason_not_allowed"
+        if customer_counts.get(req.customer_id, 0) > scenario.max_returns_per_customer_30d:
+            return "velocity_limit_exceeded"
+        if score_map.get(req.return_id, 0.0) >= high_risk_threshold:
+            return "high_fraud_score"
+        return None
+
+    def compare(
+        self,
+        scenarios: List[PolicyScenario],
+        requests: List[ReturnRequest],
+        fraud_scores: Optional[List[FraudScore]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Run multiple scenarios and return a comparison table."""
+        results = [self.simulate(s, requests, fraud_scores) for s in scenarios]
+        return sorted([r.summary() for r in results], key=lambda x: x["rejection_rate"])
+
+    def to_markdown(self, results: List[Dict[str, Any]]) -> str:
+        """Render scenario comparison as Markdown."""
+        lines = ["# Policy Simulation Comparison", "",
+                 "| Scenario | Approved | Rejected | Rejection Rate | Fraud Prevented |",
+                 "|----------|----------|----------|----------------|-----------------|"]
+        for r in results:
+            lines.append(
+                f"| {r['scenario']} | {r['approved']} | {r['rejected']} | "
+                f"{r['rejection_rate']:.1%} | {r['estimated_fraud_prevented']} |"
+            )
+        return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERT: FRAUD SIGNAL EXPLAINER
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SIGNAL_EXPLANATIONS: Dict[str, Dict[str, str]] = {
+    "high_return_rate": {
+        "label": "High Return Rate",
+        "description": "Customer has returned more than 30% of all orders historically.",
+        "action": "Request photo proof of issue before approving.",
+    },
+    "wardrobing": {
+        "label": "Wardrobing Pattern",
+        "description": "Customer typically returns items after high-traffic events (holidays, weekends).",
+        "action": "Require tags-on condition check before accepting return.",
+    },
+    "empty_box": {
+        "label": "Empty Box Claim",
+        "description": "Customer claims item was missing from package.",
+        "action": "Escalate to fulfillment team to verify packing records.",
+    },
+    "policy_abuse": {
+        "label": "Policy Abuse",
+        "description": "Return submitted at the boundary of the policy window repeatedly.",
+        "action": "Flag account; require manager approval on future returns.",
+    },
+    "coupon_stacking": {
+        "label": "Coupon Stacking",
+        "description": "Order used multiple discount codes; return may be a price arbitrage attempt.",
+        "action": "Issue store credit rather than cash refund.",
+    },
+    "account_age": {
+        "label": "New Account",
+        "description": "Account is less than 30 days old with an immediate high-value return.",
+        "action": "Delay refund by 5 business days; verify identity.",
+    },
+    "velocity": {
+        "label": "High Return Velocity",
+        "description": "More than 3 returns submitted within the last 30 days.",
+        "action": "Place account on manual review for all future returns.",
+    },
+    "address_mismatch": {
+        "label": "Address Mismatch",
+        "description": "Return shipping address differs from delivery address.",
+        "action": "Contact customer to confirm return legitimacy.",
+    },
+    "refund_only": {
+        "label": "Refund-Only Pattern",
+        "description": "Customer has never exchanged — only requested full refunds.",
+        "action": "Offer exchange or store credit; block cash refund path.",
+    },
+    "serial_returner": {
+        "label": "Serial Returner",
+        "description": "Customer appears in the top 1% of returners by volume.",
+        "action": "Add to watchlist; consider return restriction policy.",
+    },
+}
+
+
+class FraudSignalExplainer:
+    """
+    Translate FraudScore signal codes into human-readable explanations.
+
+    Produces structured explanations, markdown-formatted decision summaries,
+    and customer-facing decline messages for use in email templates or
+    support tooling.
+
+    Usage::
+
+        explainer = FraudSignalExplainer()
+        print(explainer.explain(fraud_score))
+    """
+
+    def explain(self, score: FraudScore) -> Dict[str, Any]:
+        """Return structured explanation for all signals on a fraud score."""
+        explained = []
+        for signal in score.signals:
+            meta = _SIGNAL_EXPLANATIONS.get(signal.value, {
+                "label": signal.value,
+                "description": "Unknown fraud signal.",
+                "action": "Manual review recommended.",
+            })
+            explained.append({"signal": signal.value, **meta})
+        return {
+            "return_id": score.return_id,
+            "customer_id": score.customer_id,
+            "risk_level": score.risk_level.value,
+            "score": score.score,
+            "signals": explained,
+            "recommended_action": score.recommended_action,
+        }
+
+    def to_markdown(self, score: FraudScore) -> str:
+        """Render a full Markdown decision report for a fraud score."""
+        data = self.explain(score)
+        lines = [
+            f"# Fraud Decision Report — Return {score.return_id}",
+            f"**Risk Level**: {data['risk_level'].upper()}  |  **Score**: {data['score']:.3f}",
+            f"**Recommended Action**: {data['recommended_action']}",
+            "",
+            "## Fraud Signals Detected",
+        ]
+        if not data["signals"]:
+            lines.append("_No fraud signals detected._")
+        else:
+            for s in data["signals"]:
+                lines.append(f"### {s['label']}")
+                lines.append(f"- **What it means**: {s['description']}")
+                lines.append(f"- **Suggested action**: {s['action']}")
+        return "\n".join(lines)
+
+    def customer_decline_message(self, score: FraudScore) -> str:
+        """
+        Generate a polite, non-accusatory customer-facing decline message.
+        Safe to include in email templates.
+        """
+        return (
+            f"Thank you for reaching out regarding return #{score.return_id}. "
+            "After reviewing your request, we are unable to process this return at this time "
+            "based on our current return policy. If you believe this is an error, "
+            "please contact our support team with your order details and we will be happy to assist."
+        )
+
+    def bulk_explain(self, scores: List[FraudScore]) -> List[Dict[str, Any]]:
+        """Explain multiple scores; sorted by score descending."""
+        return sorted([self.explain(s) for s in scores], key=lambda x: x["score"], reverse=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPERT: RETURN SPAN EMITTER (OpenTelemetry with stdlib fallback)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ReturnSpanEmitter:
+    """
+    Emit OpenTelemetry spans for returns fraud scoring operations.
+    Falls back to structured logging when opentelemetry-sdk is not installed.
+    """
+
+    def __init__(self, service_name: str = "returnguard") -> None:
+        self._service = service_name
+        self._otel_available = False
+        self._tracer: Any = None
+        try:
+            from opentelemetry import trace
+            from opentelemetry.sdk.trace import TracerProvider
+            provider = TracerProvider()
+            trace.set_tracer_provider(provider)
+            self._tracer = trace.get_tracer(service_name)
+            self._otel_available = True
+            logger.debug("ReturnSpanEmitter: OpenTelemetry tracer initialised")
+        except ImportError:
+            logger.debug("ReturnSpanEmitter: opentelemetry not installed — using log fallback")
+
+    def span(self, operation: str, attributes: Optional[Dict[str, Any]] = None) -> Any:
+        """Context manager: emit an OTEL span or log span start/end."""
+        if self._otel_available and self._tracer is not None:
+            span = self._tracer.start_span(operation)
+            if attributes:
+                for k, v in attributes.items():
+                    span.set_attribute(k, str(v))
+            return span
+        return _LogSpan(operation, attributes or {}, self._service)
+
+    def emit_score(self, score: FraudScore) -> None:
+        """Emit a span for a completed fraud scoring result."""
+        attrs = {
+            "return_id": score.return_id,
+            "customer_id": score.customer_id,
+            "score": score.score,
+            "risk_level": score.risk_level.value,
+            "signal_count": len(score.signals),
+        }
+        with self.span("returnguard.score", attrs):
+            pass
+
+
+class _LogSpan:
+    """Stdlib-logging fallback span used when OTEL is unavailable."""
+
+    def __init__(self, name: str, attrs: Dict[str, Any], service: str) -> None:
+        self._name = name
+        self._attrs = attrs
+        self._service = service
+        self._t0 = time.monotonic()
+
+    def __enter__(self) -> "_LogSpan":
+        logger.debug("[span:start] service=%s operation=%s attrs=%s", self._service, self._name, self._attrs)
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        elapsed = round((time.monotonic() - self._t0) * 1000, 2)
+        logger.debug("[span:end] service=%s operation=%s elapsed_ms=%s", self._service, self._name, elapsed)
