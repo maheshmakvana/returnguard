@@ -177,6 +177,9 @@ entries = log.export()
 
 ## Changelog
 
+### v1.2.2 (2026-04-10)
+- Added Contributing and Author sections to README
+
 ### v1.2.1 (2026-04-10)
 - Fixed type error in `SimulationResult.to_dict()` — `max()` key now uses explicit lambda for reliable `SupportsRichComparison` resolution
 - Fixed Pylance `reportMissingImports` on optional `opentelemetry` imports in `ReturnSpanEmitter` — guarded with `# type: ignore[import-untyped]` (runtime behaviour unchanged; opentelemetry remains optional)
