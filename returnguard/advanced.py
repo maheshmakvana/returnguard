@@ -549,7 +549,7 @@ class PolicySimulationResult:
             "rejected": self.rejected,
             "rejection_rate": round(self.rejection_rate, 4),
             "estimated_fraud_prevented": self.estimated_fraud_prevented,
-            "top_rejection_reason": max(self.rejection_reasons, key=self.rejection_reasons.get) if self.rejection_reasons else None,
+            "top_rejection_reason": max(self.rejection_reasons, key=lambda r: self.rejection_reasons[r]) if self.rejection_reasons else None,
         }
 
 
@@ -804,8 +804,8 @@ class ReturnSpanEmitter:
         self._otel_available = False
         self._tracer: Any = None
         try:
-            from opentelemetry import trace
-            from opentelemetry.sdk.trace import TracerProvider
+            from opentelemetry import trace  # type: ignore[import-untyped]
+            from opentelemetry.sdk.trace import TracerProvider  # type: ignore[import-untyped]
             provider = TracerProvider()
             trace.set_tracer_provider(provider)
             self._tracer = trace.get_tracer(service_name)

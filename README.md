@@ -175,6 +175,23 @@ log.record("blocked", "RET-001")
 entries = log.export()
 ```
 
+## Changelog
+
+### v1.2.1 (2026-04-10)
+- Fixed type error in `SimulationResult.to_dict()` — `max()` key now uses explicit lambda for reliable `SupportsRichComparison` resolution
+- Fixed Pylance `reportMissingImports` on optional `opentelemetry` imports in `ReturnSpanEmitter` — guarded with `# type: ignore[import-untyped]` (runtime behaviour unchanged; opentelemetry remains optional)
+
+### v1.2.0 (2026-03-xx)
+- Added `RefundAnomalyDetector` — statistical anomaly detection on refund amounts
+- Added `BehaviorFingerprinter` — fingerprint customer return behaviour patterns
+- Expanded SEO keywords for PyPI discoverability
+
+### v1.0.1
+- Advanced features update: pipeline, caching, validation, diff/trend, streaming, audit log
+
+### v1.0.0
+- Initial release: core fraud scoring, wardrobing, serial returner, velocity, policy abuse detection
+
 ## License
 
 MIT
